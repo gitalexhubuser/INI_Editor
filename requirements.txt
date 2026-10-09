@@ -1,0 +1,16 @@
+Шаг 1. Создай EXE-файл редактора
+
+Открой папку, куда ты распаковал архив ini_settings_editor_package.zip. В ней должны лежать ini_editor.py и register_ini_association.py.
+
+В адресной строке Проводника, находясь в этой папке, напиши cmd и нажми Enter.
+
+В открывшемся окне выполни команды по очереди:
+
+Команда 1 — установить необходимые компоненты
+
+py -m pip install --upgrade pyinstaller customtkinter
+Копировать команду
+
+Команда 2 — собрать приложение
+
+py -m PyInstaller --noconfirm --clean --windowed --name "INI Settings Editor" --collect-all customtkinter ini_editor.py
