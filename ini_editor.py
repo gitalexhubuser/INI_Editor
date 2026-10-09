@@ -6,6 +6,8 @@ Save-All версия: изменения всех файлов держатся
 import customtkinter as ctk
 import os
 import re
+import sys
+import tempfile
 from tkinter import filedialog, messagebox
 
 
@@ -13,6 +15,45 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 PATH_HINTS = ['путь', 'папка', 'path', 'folder', 'dir', 'directory']
+
+
+def read_ini_file(path):
+    """Read an INI file while retaining its encoding and exact line endings."""
+    with open(path, 'rb') as f:
+        raw = f.read()
+
+    if raw.startswith(b'\xef\xbb\xbf'):
+        encoding = 'utf-8-sig'
+        text = raw.decode(encoding)
+    elif raw.startswith((b'\xff\xfe', b'\xfe\xff')):
+        encoding = 'utf-16'
+        text = raw.decode(encoding)
+    else:
+        text = None
+        encoding = None
+        # Prefer Unicode, then the active Windows code page (often CP1251 on
+        # Russian Windows), with common legacy encodings as fallbacks.
+        for candidate in ('utf-8', 'mbcs', 'cp1251', 'cp1252'):
+            try:
+                text = raw.decode(candidate)
+                encoding = candidate
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        if text is None:
+            raise UnicodeError('Не удалось определить кодировку файла')
+
+    return text.splitlines(keepends=True), encoding
+
+
+def get_line_ending(line):
+    if line.endswith('\r\n'):
+        return '\r\n'
+    if line.endswith('\n'):
+        return '\n'
+    if line.endswith('\r'):
+        return '\r'
+    return ''
 
 
 # ------------------------------------------------------------------ helpers
@@ -43,13 +84,16 @@ def parse_range(comment):
 
 # ------------------------------------------------------------------ app
 class IniEditor(ctk.CTk):
-    def __init__(self):
+    def __init__(self, initial_file=None):
         super().__init__()
         self.title("INI Редактор Настроек")
         self.geometry("1220x780")
         self.minsize(950, 620)
 
-        self.config_dir = os.path.dirname(os.path.abspath(__file__))
+        self.initial_file = os.path.abspath(initial_file) if initial_file else None
+        self.config_dir = (os.path.dirname(self.initial_file)
+                           if self.initial_file else
+                           os.path.dirname(os.path.abspath(__file__)))
         self.current_file = None
         self.current_lines = []
         self.kv_widgets = {}
@@ -60,6 +104,8 @@ class IniEditor(ctk.CTk):
 
         self._build_ui()
         self._load_files(self.config_dir)
+        if self.initial_file and os.path.isfile(self.initial_file):
+            self._open_file(self.initial_file)
 
     # -------------------------------------------------------- UI
     def _build_ui(self):
@@ -188,7 +234,8 @@ class IniEditor(ctk.CTk):
         if res is None:
             return False
         if res:
-            self._save_all(silent=True)
+            # Do not discard the in-memory edits if any file failed to save.
+            return self._save_all(silent=True)
         return True
 
     # -------------------------------------------------------- open file
@@ -196,12 +243,15 @@ class IniEditor(ctk.CTk):
         # значение кеша уже актуально, т.к. поля пишут в lines через trace
         if path not in self.files_cache:
             try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
+                lines, encoding = read_ini_file(path)
             except Exception as e:
                 messagebox.showerror("Ошибка", f"Не удалось открыть файл:\n{e}")
                 return
-            self.files_cache[path] = {'lines': lines, 'dirty': False}
+            self.files_cache[path] = {
+                'lines': lines,
+                'dirty': False,
+                'encoding': encoding,
+            }
 
         self.current_file = path
         self.current_lines = self.files_cache[path]['lines']
@@ -390,7 +440,8 @@ class IniEditor(ctk.CTk):
             return
 
         raw = lines[idx]
-        eol = '\n' if raw.endswith('\n') else ''
+        eol = get_line_ending(raw)
+        content = raw[:-len(eol)] if eol else raw
         t = info['type']
         var = info['var']
 
@@ -400,7 +451,6 @@ class IniEditor(ctk.CTk):
             else:
                 val = '1' if (t == 'bool' and var.get() == 1) else \
                       '0' if (t == 'bool') else str(var.get())
-                content = raw.rstrip('\n').rstrip('\r')
                 m = re.match(r'^(\s*[^=]*?=\s*)(.*?)(\s*)$', content)
                 if m:
                     new_line = m.group(1) + val + m.group(3) + eol
@@ -476,31 +526,49 @@ class IniEditor(ctk.CTk):
         if not self.files_cache:
             if not silent:
                 messagebox.showinfo("Инфо", "Нет открытых файлов")
-            return
+            return False
 
         saved, failed = [], []
         for path, data in self.files_cache.items():
+            temp_path = None
             try:
-                with open(path, 'w', encoding='utf-8') as f:
-                    f.writelines(data['lines'])
+                # Keep the original encoding (including UTF-8/UTF-16 BOMs).
+                payload = ''.join(data['lines']).encode(data['encoding'])
+                folder = os.path.dirname(path) or '.'
+                prefix = '.' + os.path.basename(path) + '.'
+                fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix='.tmp', dir=folder)
+                with os.fdopen(fd, 'wb') as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                # Atomic replacement avoids truncating the original on a partial write.
+                os.replace(temp_path, path)
+                temp_path = None
                 data['dirty'] = False
                 saved.append(path)
                 self._update_file_button_label(path)
             except Exception as e:
                 failed.append((path, e))
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
 
         self._refresh_status()
 
         if failed:
             msg = "\n".join(f"{os.path.basename(p)}: {e}" for p, e in failed)
             messagebox.showerror("Ошибка сохранения", msg)
-            return
+            return False
 
         if not silent:
             self.status.configure(
                 text=f"✅  Сохранено файлов: {len(saved)}",
                 text_color="#7FBA00")
             self.after(3000, self._refresh_status)
+        return True
 
     # -------------------------------------------------------- graceful exit
     def on_close(self):
@@ -509,6 +577,8 @@ class IniEditor(ctk.CTk):
 
 
 if __name__ == "__main__":
-    app = IniEditor()
+    # Explorer passes the double-clicked file as the first command-line argument.
+    initial_file = sys.argv[1] if len(sys.argv) > 1 else None
+    app = IniEditor(initial_file=initial_file)
     app.protocol("WM_DELETE_WINDOW", app.on_close)
     app.mainloop()
