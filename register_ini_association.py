@@ -54,6 +54,19 @@ def delete_tree_if_exists(root, path):
         pass
 
 
+def find_built_exe():
+    """Find the compiled application if PyInstaller has already built it."""
+    base = os.path.abspath(os.path.dirname(__file__))
+    candidates = (
+        os.path.join(base, 'dist', 'INI Settings Editor', 'INI Settings Editor.exe'),
+        os.path.join(base, 'INI Settings Editor.exe'),
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def install():
     script = os.path.abspath(os.path.join(os.path.dirname(__file__), 'ini_editor.py'))
     if not os.path.isfile(script):
@@ -66,8 +79,15 @@ def install():
         with open(BACKUP_FILE, 'w', encoding='utf-8') as f:
             json.dump({'old_default': old_default}, f, ensure_ascii=False, indent=2)
 
-    runner = pythonw_path()
-    command = f'"{runner}" "{script}" "%1"'
+    built_exe = find_built_exe()
+    if built_exe:
+        runner = built_exe
+        command = f'"{runner}" "%1"'
+        print('Найден собранный EXE; регистрирую именно его.')
+    else:
+        runner = pythonw_path()
+        command = f'"{runner}" "{script}" "%1"'
+        print('Собранный EXE не найден; регистрирую запуск через Python.')
 
     set_default(ext_key, PROG_ID)
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, ext_key + r'\OpenWithProgids') as key:
@@ -79,6 +99,14 @@ def install():
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, prog + r'\shell\open\command') as key:
         winreg.SetValueEx(key, '', 0, winreg.REG_SZ, command)
     set_default(prog + r'\DefaultIcon', f'"{runner}",0')
+
+    # Also advertise the handler through the classic Open With application list.
+    app_key = CLASSES + r'\Applications\INI Settings Editor.exe'
+    set_default(app_key + r'\DefaultIcon', f'"{runner}",0')
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_key + r'\shell\open\command') as key:
+        winreg.SetValueEx(key, '', 0, winreg.REG_SZ, command)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_key + r'\SupportedTypes') as key:
+        winreg.SetValueEx(key, '.ini', 0, winreg.REG_SZ, '')
 
     # Make the handler discoverable in Windows' registered-applications list.
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, CAPABILITIES) as key:
@@ -133,8 +161,15 @@ def uninstall():
 
     delete_tree_if_exists(winreg.HKEY_CURRENT_USER, CAPABILITIES + r'\FileAssociations')
     delete_tree_if_exists(winreg.HKEY_CURRENT_USER, CAPABILITIES)
-    # Remove nested ProgID keys deepest-first.
-    for path in (CLASSES + '\\' + PROG_ID + r'\shell\open\command',
+    # Remove the explicit Open With registration created by this installer.
+    app_key = CLASSES + r'\Applications\INI Settings Editor.exe'
+    for path in (app_key + r'\shell\open\command',
+                 app_key + r'\shell\open',
+                 app_key + r'\shell',
+                 app_key + r'\SupportedTypes',
+                 app_key + r'\DefaultIcon',
+                 app_key,
+                 CLASSES + '\\' + PROG_ID + r'\shell\open\command',
                  CLASSES + '\\' + PROG_ID + r'\shell\open',
                  CLASSES + '\\' + PROG_ID + r'\shell',
                  CLASSES + '\\' + PROG_ID + r'\DefaultIcon',
